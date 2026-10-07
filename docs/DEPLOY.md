@@ -108,3 +108,76 @@ export GRAPH_BUCKET=<bucket-name>    # explicit go-signal; bucket must exist
 python pipeline/upload.py --execute  # actual upload via the default credential chain
 ```
 
+DEPLOYMENT GATE: the Phase 3 route Lambda reads exactly these five keys
+(`graph/graph.pkl`, `shade/summer.npy`, `shade/monsoon.npy`, `flood/flood.npy`,
+`graph/coverage.geojson`) from `GraphBucket` at cold start — the upload above
+MUST have completed before the first `POST /route`, or the handler answers 500
+with a loud `no routing bundle configured` / download error in CloudWatch
+(docs/BLOCKERS.md owns the creds-pending row).
+
+## 7. Phase 3 — routing API deploy path (handler + engine live)
+
+`infra/template.yaml` now ships the real Phase 3 RouteFunction: 1024 MB / 30 s,
+S3 read policy on GraphBucket, explicit bundle-key env vars
+(`S3_KEY_GRAPH` / `S3_KEY_SHADE_SUMMER` / `S3_KEY_SHADE_MONSOON` /
+`S3_KEY_FLOOD` / `S3_KEY_COVERAGE`), `WALK_SPEED_MPS=1.1`, and a dedicated
+`GET /route/stats` event. No geo-routes IAM is added — the baseline
+CalculateRoutes call runs in the browser with the referer-restricted Location
+key (docs/DECISIONS.md).
+
+Build + deploy is the SAME § 3 sequence (no flag changes):
+
+```bash
+cd infra
+sam build && sam validate && sam deploy --guided   # first time; later: sam deploy
+# §4 size guard after build:
+du -sh .aws-sam/build/RouteFunction                # keep < 250 MB unzipped
+```
+
+Wheel fallback reminder (no Docker in CI/sandbox, §3): if `sam build` host-
+installs wheels, rebuild setuptools/pip-free with
+`pip install --platform manylinux2014_x86_64 --implementation cp
+--python-version 3.12 --only-binary=:all: -t .aws-sam/build/RouteFunction
+-r lambdas/route/requirements.txt` before zipping — numpy/networkx/shapely only.
+
+Smoke + contract path (replace `$API_URL`, coords are inside the Karol Bagh
+BBOX 77.178–77.208 / 28.642–28.657):
+
+```bash
+# Phase 0 smoke still answers (contract unchanged):
+curl "$API_URL/route"
+
+# Graph summary (§6.6):
+curl "$API_URL/route/stats"
+# → {"area":"Karol Bagh","n_edges":...,"n_nodes":...,"bbox":[77.178,...],
+#    "slots":48,"seasons":["summer","monsoon"],"weights":{...}}
+
+# Direct route:
+curl -X POST "$API_URL/route" -H 'content-type: application/json' -d '{
+  "origin": [77.1830, 28.6440], "destination": [77.2050, 28.6550],
+  "mode": "direct", "time": "15:30"}'
+
+# Shade route for the same ask (summer weighting, a_shade=2.0):
+curl -X POST "$API_URL/route" -H 'content-type: application/json' -d '{
+  "origin": [77.1830, 28.6440], "destination": [77.2050, 28.6550],
+  "mode": "shade", "season": "summer", "time": "15:30"}'
+
+# Flood-aware monsoon route (hard underpass avoidance):
+curl -X POST "$API_URL/route" -H 'content-type: application/json' -d '{
+  "origin": [77.1830, 28.6440], "destination": [77.2050, 28.6550],
+  "mode": "flood", "season": "monsoon", "time": "15:30"}'
+```
+
+Response shape (§6.5): `route` ([[lng,lat],...]), `distance_m`, `duration_s`
+(at the 1.1 m/s env walk speed), `shade_profile` (48 length-weighted floats —
+built from per-edge arrays that already carry the max of both walk sides),
+`shade_score` (the profile value at `slot`), `flood_profile` (per season),
+`mode`, `season`, `slot`, plus `slot_time` and `clamped`. Errors are
+`400 outside_coverage` (with the loaded coverage polygon) / `400 no_route` /
+`400 bad_request`; the `/advice` path returns `501` until Phase 6.
+
+Warm-latency watch (§4): the first POST after deploy pays the cold-start
+download + engine build (watch the `ColdStartMs` EMF line in CloudWatch →
+`chhaya` namespace); warm repeats hit the 64-entry LRU and should stay well
+under the 2 s budget.
+

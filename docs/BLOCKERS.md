@@ -6,5 +6,7 @@
 
 | 2026-10-07 | 2 | `pipeline/upload.py` is fully written and guarded (GRAPH_BUCKET env + `--execute` flag, dry-run default) but ready-not-run: this build environment has no AWS credentials, so no artifact has ever left the machine. | Guard documented in DEPLOY.md §6; upload executes the moment credentials exist (same §11 fallback as the Phase 0 row above). |
 
+| 2026-10-07 | 3 | The Phase 3 cold-start S3 load path (`routing.load_engine_from_env` → boto3 download to /tmp) is implemented and unit-covered for the local-dir variant, but ready-not-verified: this environment has no AWS credentials, so `GRAPH_BUCKET` download, `/tmp` cache reuse on warm invokes, and `S3ReadPolicy` grants have never run. All compute paths (cost matrices, snap, Dijkstra, all three modes) are fully fixture-tested (30 tests). | None needed — deploy + first `POST /route` (DEPLOY.md §7) verifies it with the `ColdStartMs` EMF line; re-read this row if CloudWatch shows a download failure. |
+
 
 <!-- Template for the next row: | YYYY-MM-DD | phase | `<exact error string>` | §11 fallback N + one-line note | -->
