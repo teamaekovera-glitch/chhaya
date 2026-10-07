@@ -1,0 +1,23 @@
+version: 1
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - cd web
+        - npm ci
+    build:
+      commands:
+        # §11 gotcha: write the VITE_ vars to .env.production so Vite statically
+        # replaces them at build time. Values come from Amplify console env vars —
+        # the Location key is committed NOWHERE (it is referer-restricted anyway).
+        - echo "VITE_API_URL=${VITE_API_URL}" >> .env.production
+        - echo "VITE_LOCATION_API_KEY=${VITE_LOCATION_API_KEY}" >> .env.production
+        - echo "VITE_AWS_REGION=${VITE_AWS_REGION:-ap-south-1}" >> .env.production
+        - npm run build
+  artifacts:
+    baseDirectory: web/dist
+    files:
+      - '**/*'
+  cache:
+    paths:
+      - web/node_modules/**/*
