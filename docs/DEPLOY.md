@@ -182,6 +182,32 @@ download + engine build (watch the `ColdStartMs` EMF line in CloudWatch →
 under the 2 s budget.
 
 
+## 8. Phase 4 — frontend wiring (web/ consumes everything above)
+
+The UI is live at this point: place search, route drawing, and the baseline
+all call real services once the three Amplify env vars exist. What changes
+for Phase 4:
+
+1. **No new build steps.** `amplify.yml` is unchanged from Phase 0
+   (`npm ci` → write `.env.production` → `npm run build`). The Phase 4 code
+   introduces no new runtime dependencies (still maplibre-gl + react only),
+   so the Phase 0 artifact config works as-is.
+2. **Env names are final** — `env.ts` reads exactly the three variables the
+   Phase 0 build spec already writes into `.env.production`:
+   `VITE_API_URL` (HttpApi endpoint from §7 smoke), `VITE_LOCATION_API_KEY`
+   (the (b) key value), `VITE_AWS_REGION`. Missing `VITE_API_URL` shows a
+   config banner; missing key disables only the map+baseline (pickers show
+   a search error, routes still draw).
+3. **Post-deploy URL smoke (?mock=1):** `https://<amplify-domain>/?mock=1`
+   boots with the Karol Bagh preset filled, runs route + chips + strip on
+   synthetic data, and draws all three lines on the fallback map. Use it to
+   verify the Amplify build env wiring BEFORE trying live search; live
+   Locations calls remain unverified without a real key (BLOCKERS.md).
+4. **Coverage tightened at this point (§4c):** with the web live, flip
+   HttpApi `AllowOrigins` from `*` to the Amplify domain (+ localhost:5173)
+   in `infra/template.yaml` and redeploy — the frontend now has a real
+   origin to allowlist.
+
 ## 9. Phase 5 — ops deploy path (state machine + dashboard, same stack bootstrap order)
 
 Same stack (`sam deploy --guided` on the existing `chhaya` stack) — no second stack:
@@ -218,3 +244,4 @@ aws stepfunctions start-execution \
    after fixing data needs no manual S3 cleanup. `ValidateGraph` failures stop the
    run with `NotifyValidationFailure` before any manifest write (the handler validates
    before it uploads — the state machine is invoked post-upload in the offline MVP).
+
