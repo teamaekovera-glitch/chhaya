@@ -3,6 +3,13 @@
 Run once AWS credentials exist (`aws sts get-caller-identity` succeeds). Commands are
 ordered; §0 rule 9 applies — 20 minutes stuck on one error → `docs/BLOCKERS.md` + §11 fallback.
 
+> **Phase 6 note:** this runbook is unchanged in content; the only addition is this pointer.
+> Judge-facing narrative (pitch, demo story, honest status) lives in the root `README.md` and
+> `docs/SUBMISSION.md`; the recorded demo follows `docs/VIDEO_SCRIPT.md`, whose § 2:00
+> console-tour segment walks exactly this runbook's § 3/§ 7/§ 9 sequence. The numbers spoken
+> in the video (4,386 nodes, 10,662 edges, flood mean/p90/max, shade by slot) are the ones
+> this runbook's § 7 `/route/stats` and the committed data arrays print.
+
 ## 0. Before anything deploys (user, console — the plan's first action)
 
 Set the **$5 budget alert** in the AWS console (Billing → Budgets → Create budget →
