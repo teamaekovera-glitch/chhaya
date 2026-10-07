@@ -181,3 +181,40 @@ download + engine build (watch the `ColdStartMs` EMF line in CloudWatch →
 `chhaya` namespace); warm repeats hit the 64-entry LRU and should stay well
 under the 2 s budget.
 
+
+## 9. Phase 5 — ops deploy path (state machine + dashboard, same stack bootstrap order)
+
+Same stack (`sam deploy --guided` on the existing `chhaya` stack) — no second stack:
+SAM adds two resources to it, `PrecomputeHandlerFunction` and `PrecomputeStateMachine`,
+plus the `ChhayaOpsDashboard`, in CREATE order below. Nothing from Phase 0–3 is touched;
+their resources keep their addresses.
+
+Bootstrap order:
+
+1. Deploy the stack (`sam deploy` as in §3). Create order inside CloudFormation:
+   the precompute Lambda first (its only dependency is S3 read/write), then the state machine
+   (`DefinitionSubstitutions.PrecomputeHandlerArn` substitutes the Lambda's ARN),
+   then the dashboard — safe because the dashboard only reads metric lines, so a
+   widget can go "no data" on the first minute without failing the change set.
+2. Start a run through the state machine (Summer + Monsoon in one execution):
+
+```bash
+aws stepfunctions start-execution \
+  --state-machine-arn "$(aws cloudformation describe-stacks --stack-name chhaya \
+    --query 'Stacks[0].Outputs[?OutputKey==`PrecomputeStateMachineArn`].OutputValue' --output text)" \
+  --input '{"seasons": ["summer", "monsoon"]}'
+```
+
+3. Watch it: `aws stepfunctions describe-execution --execution-arn <arn>` until
+   `status` is `SUCCEEDED`. The two `RunShadeSeason` branches each produced
+   `s3://<GraphBucket>/manifest/{season}.json`; `aws s3 ls s3://<GraphBucket>/manifest/`
+   should show both. A failed run surfaces in `ExecutionsFailed`.
+4. Dashboard: CloudWatch console → Dashboards → `ChhayaOpsDashboard` — six widgets,
+   Phase-3 route metrics (Invocations / Duration / Errors), HttpApi 4xx/5xx, the state
+   machine's `ExecutionsStarted/ExecutionsFailed`, and the operational-notes text
+   widget. Region is whatever §1 pinned; no region pins in the dashboard JSON itself.
+5. Re-run semantics: every state-machine execution rewrites
+   `manifest/{season}.json` for the same bucket/key inputs — idempotent, so a re-run
+   after fixing data needs no manual S3 cleanup. `ValidateGraph` failures stop the
+   run with `NotifyValidationFailure` before any manifest write (the handler validates
+   before it uploads — the state machine is invoked post-upload in the offline MVP).

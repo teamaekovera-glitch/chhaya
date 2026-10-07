@@ -1,0 +1,166 @@
+{
+  "Comment": "CHHAYA Phase 5 — re-precompute orchestration (§10 Phase 5, offline-MVP scope). States: FetchData -> RunShadeSeason (Map over seasons -> PrecomputeHandler stub per §6.2) -> ValidateGraph (§7.6 minimums via the same stub) -> UploadArtifacts (pass-through to the pipeline/upload.py contract) -> WriteManifest (manifest stub — the Lambda-stub choice over the direct S3 integration is recorded in docs/DECISIONS.md). RunShadeSeason's Catch routes any to a Fail state whose ExecutionsFailed metric is the §7.9 notify signal on the CloudWatch dashboard.",
+  "StartAt": "FetchData",
+  "States": {
+    "FetchData": {
+      "Type": "Pass",
+      "Comment": "Pass-through of the run_pipeline.sh-composed ingest contract {GRAPH_BUCKET, S3_KEY_GRAPH, seasons} — the SAME bucket/key env-name contract the route Lambda reads (task brief), so a future real compute can swap in unchanged.",
+      "Next": "RunShadeSeason"
+    },
+    "RunShadeSeason": {
+      "Type": "Map",
+      "Comment": "Map over the season terms (§6.2: summer, monsoon) — each item invokes the PrecomputeHandler stub with the {season, GRAPH_BUCKET, S3_KEY_GRAPH} contract.",
+      "ItemsPath": "$.seasons",
+      "MaxConcurrency": 2,
+      "ItemSelector": {
+        "season.$": "$",
+        "GRAPH_BUCKET.$": "$$.Execution.Input.GRAPH_BUCKET",
+        "S3_KEY_GRAPH.$": "$$.Execution.Input.S3_KEY_GRAPH"
+      },
+      "ItemProcessor": {
+        "StartAt": "InvokePrecompute",
+        "States": {
+          "InvokePrecompute": {
+            "Type": "Task",
+            "Comment": "PrecomputeHandler stub: head_object the routing bundle, assert §7.6 minimums, write s3://<GRAPH_BUCKET>/manifest/<season>.json, return {status, season, manifest_key}.",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${PrecomputeHandlerArn}",
+              "Payload": {
+                "season.$": "$.season",
+                "GRAPH_BUCKET.$": "$.GRAPH_BUCKET",
+                "S3_KEY_GRAPH.$": "$.S3_KEY_GRAPH"
+              }
+            },
+            "End": true
+          }
+        }
+      },
+      "ResultPath": "$.results",
+      "ResultSelector": {
+        "season.$": "$.Payload.season",
+        "GRAPH_BUCKET.$": "$.Payload.GRAPH_BUCKET",
+        "S3_KEY_GRAPH.$": "$.Payload.S3_KEY_GRAPH",
+        "manifest_key.$": "$.Payload.manifest_key",
+        "graph_size_bytes.$": "$.Payload.graph_size_bytes",
+        "edge_count.$": "$.Payload.edge_count",
+        "node_count.$": "$.Payload.node_count"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.Timeout",
+            "Lambda.ServiceException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "NotifyValidationFailure"
+        }
+      ],
+      "Next": "ValidateGraph"
+    },
+    "ValidateGraph": {
+      "Type": "Task",
+      "Comment": "Small validator (the same PrecomputeHandler stub) on the FIRST season result: head_object + §7.6 minimums. Results arrive in the SAME order as the seasons list (Step Functions consolidates results in iteration order), so index 0 is summer. Failure notifies via the shared Fail state; the state machine re-run owned error retry is capped at 2 attempts (§5.3 retry budget).",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${PrecomputeHandlerArn}",
+        "Payload": {
+          "season.$": "$.results[0].season",
+          "GRAPH_BUCKET.$": "$.results[0].GRAPH_BUCKET",
+          "S3_KEY_GRAPH.$": "$.results[0].S3_KEY_GRAPH"
+        }
+      },
+      "ResultPath": "$.validation",
+      "ResultSelector": {
+        "status.$": "$.Payload.status",
+        "season.$": "$.Payload.season",
+        "GRAPH_BUCKET.$": "$.Payload.GRAPH_BUCKET",
+        "S3_KEY_GRAPH.$": "$.Payload.S3_KEY_GRAPH",
+        "graph_size_bytes.$": "$.Payload.graph_size_bytes",
+        "manifest_key.$": "$.Payload.manifest_key"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.Timeout",
+            "Lambda.ServiceException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.TaskFailed", "States.Timeout"],
+          "ResultPath": "$.error",
+          "Next": "NotifyValidationFailure"
+        }
+      ],
+      "Next": "UploadArtifacts"
+    },
+    "UploadArtifacts": {
+      "Type": "Pass",
+      "Comment": "Pass-through to the upload contract used by pipeline/upload.py — this state EXISTS as the §7.9 upload slot; on the offline MVP the upload runs locally (pipeline/upload.py) before the state machine is invoked, so the stub validates the already-uploaded bundle.",
+      "Next": "WriteManifest"
+    },
+    "WriteManifest": {
+      "Type": "Task",
+      "Comment": "Chosen contract: manifest.json is written by the PrecomputeHandler Lambda stub, NOT the direct S3:PublishToAwsManagedStates integration (§7.9) — justified in docs/DECISIONS.md as stub-testability without Docker and the explicit write path. The manifest object is idempotent (same season -> same key).",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${PrecomputeHandlerArn}",
+        "Payload": {
+          "season.$": "$.validation.season",
+          "GRAPH_BUCKET.$": "$.validation.GRAPH_BUCKET",
+          "S3_KEY_GRAPH.$": "$.validation.S3_KEY_GRAPH"
+        }
+      },
+      "ResultPath": "$.manifest",
+      "ResultSelector": {
+        "status.$": "$.Payload.status",
+        "season.$": "$.Payload.season",
+        "manifest_key.$": "$.Payload.manifest_key"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.Timeout",
+            "Lambda.ServiceException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.TaskFailed", "States.Timeout"],
+          "ResultPath": "$.error",
+          "Next": "NotifyValidationFailure"
+        }
+      ],
+      "End": true
+    },
+    "NotifyValidationFailure": {
+      "Type": "Fail",
+      "Comment": "§7.9 fail->notify slot: the failed execution is the notification (ExecutionsFailed metric on the chhaya-mvp dashboard — docs/DECISIONS.md).",
+      "Error": "Chhaya.PrecomputeFailed",
+      "Cause": "Precompute validation or manifest write failed — see the execution's step history for the state that failed."
+    }
+  }
+}

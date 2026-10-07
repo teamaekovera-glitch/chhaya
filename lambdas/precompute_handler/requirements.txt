@@ -1,0 +1,5 @@
+# PrecomputeHandler Lambda dependency set — Phase 5 (task brief: boto3 ONLY).
+# botocore (Stubber's home in tests) is boto3's own dependency, and the Lambda
+# runtime ships boto3/botocore natively — nothing else is (or ever should be)
+# added under §0 rule 5.
+boto3>=1.28,<2.0

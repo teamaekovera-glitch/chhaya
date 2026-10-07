@@ -85,3 +85,59 @@
   `--execute`; default is a dry-run listing. Logged in BLOCKERS.md as
   ready-but-creds-pending.
 
+
+## Phase 5 — Step Functions re-precompute + CloudWatch dashboard (2026-10-07)
+
+Scope (§10 Phase 5 exactly): extend-only on the frozen Phase 0 template, one state
+machine, one stub Lambda, one dashboard. No Bedrock, no DynamoDB, no frontend.
+
+- **Manifest writer is a Lambda stub, not the direct S3 integration**
+  (`arn:aws:states:::s3:putObject` with `ResultWriter`/`Parameters.Bucket` style).
+  Justification (per the brief's stated preference): the stub is explicit and fully
+  testable with botocore Stubs and local fakes, requires no Docker, keeps the manifest
+  document shaped by Python (scalar `graph_size_bytes` from `head_object` instead of
+  an ASL-composed JSON body), and adds no new integration IAM surface. The ASL stays
+  single-service (lambda:invoke only), so `test_task_states_use_lambda_invoke_integration`
+  holds for all Task states.
+- **Map over seasons, not slots**: `RunShadeSeason` iterates `$.seasons` =
+  `["summer", "monsoon"]` (the §6.2 season values), `MaxConcurrency: 2`. The task text's
+  "Map over 96 slot items" belongs to the future real compute; the MVP stub is
+  season-grained, matching brief (a) "Map state over [summer, monsoon] season params".
+- **Lambda stub now, real compute later — same env surface**: `precompute_handler` takes
+  the SAME `GRAPH_BUCKET` + `S3_KEY_GRAPH` env names the route Lambda uses, because a
+  future real compute swaps in without touching the state machine contract. Handler
+  event: `{season, GRAPH_BUCKET, S3_KEY_GRAPH}` (ASL `Parameters.Payload` uses
+  `season.$` path composition). Validation order: validate event (§6.2 seasons) ->
+  head_object (size > 0) -> §7.6 minimums (non-empty graph reachability keys,
+  connectivity >= 0.95) -> manifest `s3://<GRAPH_BUCKET>/manifest/{season}.json`.
+  The Fail state `NotifyValidationFailure` is the only terminal; Catch wires on both
+  Task states point there.
+- **Verified AWS API shapes against live docs before writing** (AWS-SDK signature check
+  required by the brief; pages fetched 2026-10-07):
+  - Step Functions Map: `ItemProcessor` required; `(Legacy)Iterator` deprecated —
+    https://docs.aws.amazon.com/step-functions/latest/dg/state-map.md
+  - Optimized Lambda integration `arn:aws:states:::lambda:invoke` with
+    `Parameters.FunctionName.$`/`Payload.$` —
+    https://docs.aws.amazon.com/step-functions/latest/dg/connect-lambda.html
+  - SAM `AWS::Serverless::StateMachine` with `DefinitionSubstitutions` map —
+    https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-resource-statemachine.html
+  - CloudWatch dashboard body = JSON `widgets` array with per-widget `x/y/width/height`
+    + metric-widget `properties.metrics` —
+    https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/CloudWatch-Dashboard-Body-Structure.html
+  - S3 `head_object` returns `ContentLength` (botocore shape, stubbed in tests).
+- **Dashboard** = `Dashboard` (`AWS::CloudWatch::Dashboard`, name `chhaya-mvp`), six
+  widgets, region-agnostic (`"region": "${AWS::Region}"` in every metric widget's JSON;
+  nothing hardcodes a region). Widgets:
+  (1) header Text widget titled "CHHAYA operational notes" (route API + re-precompute
+  line, the $5-budget-alert ops note, blockers pointer to docs/BLOCKERS.md — Phase 5
+  adds no rows there),
+  (2) RouteFunction `AWS/Lambda` Invocations, (3) Duration, (4) Errors — the Phase 3
+  metric set preserved (`${RouteFunction}` substituted at deploy),
+  (5) `AWS/States` ExecutionsStarted + ExecutionsFailed for `PrecomputeStateMachine`,
+  (6) HttpApi 4xx/5xx (`${HttpApi}`). Period 300 s throughout; scope stays 4-6 widgets
+  per §7.9.
+  ("$5 alert" ROI framing); scope stays 4–6 widgets per §7.9.
+- **Offline-MVP note**: the state machine is invoked AFTER push/upload in the current
+  offline-MVP shape (handler `head_object`-only), so `ValidateGraph` reads the already
+  uploaded bundle; when the real compute Lambda lands, this same ASL's Map item payload
+  grows a slot list without any state-name or wire change.
