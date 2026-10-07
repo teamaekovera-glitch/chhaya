@@ -11,3 +11,11 @@
 - `summary_en` / `summary_hi` are template strings (§6.5); Bedrock advice is deferred to Phase 3 stretch and the Bedrock model ID is **runtime-discovered** via `list-foundation-models --by-inference-type ON_DEMAND` after credentials exist — no model ID is hardcoded anywhere in Phase 0.
 - CloudWatch dashboard ships as a minimal Phase 0 widget row; the §7.9 metric set (ExtraMin, ShadeGainPct, route latency, invocations, errors) expands in Phase 3 when EMF metrics exist.
 - Deploy("/route" smoke test) is one-command-pending on AWS credentials; `docs/BLOCKERS.md` carries the blocker.
+
+## Phase 1 (2026-10-07)
+
+- `shared/solar_numpy.py` uses the **accurate** NOAA/Meeus formulation (fractional-year day-of-year terms + declination + equation-of-time, azimuth from true north clockwise) rather than the §7.4 truncated fractional-year series, which is retained as `solar_position_truncated` for comparison only — the accurate variant clears the §9 0.5° azimuth gate where the truncated series degrades near zenith. Fractional-year unit choice: **degrees** (per the §7.4 text's γ-in-degrees table), logged here per the brief's either/or rule.
+- Sun azimuth convention locked: **degrees clockwise from true north** (§7.5); shadow direction is `azimuth + 180°`, UTM sweep displacement `dx = L·sin(θ_adj)`, `dy = L·cos(θ_adj)`, `θ_adj = (azimuth + 180°) mod 360`.
+- Published `shared.shadow` import surface adds an **optional `height_m`** kwarg beyond the brief's literal signature: `shadow_sweep_polygon(footprint_utm, sun_altitude_deg, sun_azimuth_deg, max_length=250.0, height_m=None)`. Without `height_m`, `max_length` rides in as an already-computed sweep distance (`h / tan(alt)`, which the §9 tests pass as `max_length=10.0`); with it, `L = min(h / tan(alt), max_length)` per §7.5. Phase 2 callers write against this dual-path surface, not the literal one.
+- `shade_fraction(sidewalk_line, shadow_union)` and `sidewalk_offset_lines(linestring, width_m)` live in `shared/geometry.py` (brief named shared/geometry.py as the helper home; it did not specify the second helper's name — this is it).
+- pvlib stays a **test-only** dep (§0 rule 5, never a Lambda dep), listed in `tests/requirements.txt`; pytest imports it solely for the §9 equivalence gate.
