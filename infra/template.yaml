@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  CHHAYA MVP — shade- and flood-aware pedestrian routing for Karol Bagh, Delhi.
+  Phase 0: GraphBucket + hello-world RouteFunction + HTTP API (CORS) + Location API key
+  + minimal CloudWatch dashboard. Route compute, remaining Lambdas, DynamoDB and
+  Step Functions land in Phases 2-3 (CLAUDE.md §10).
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [x86_64]
+    Tracing: Active
+    Timeout: 25
+
+Resources:
+  GraphBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  RouteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/route/
+      Handler: handler.lambda_handler
+      # §4: one full vCPU for the route Lambda (faster cold start).
+      MemorySize: 1769
+      # HTTP API caps integration at 30 s (§4).
+      Timeout: 25
+      Environment:
+        Variables:
+          GRAPH_BUCKET: !Ref GraphBucket
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref GraphBucket
+      Events:
+        RouteApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /route
+            Method: any
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: prod
+      # "*" covers localhost:5173 dev now; tighten to the Amplify domain at first
+      # hosting deploy (docs/DEPLOY.md). No cookies are used, so "*" is safe for MVP.
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowHeaders:
+          - content-type
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+
+  LocationApiKey:
+    Type: AWS::Location::APIKey
+    Properties:
+      KeyName: chhaya-location-key
+      NoExpiry: true
+      Restrictions:
+        AllowActions:
+          # MapLibre fetches the Maps v2 style descriptor at init — without this action
+          # the map renders blank behind a working tile cache (deviation from §7.9,
+          # recorded in docs/DECISIONS.md).
+          - geo-maps:GetStyleDescriptor
+          - geo-maps:GetTile
+          - geo-maps:GetStaticMap
+          # Places v2 SearchText replaces the Autocomplete+GetPlace pair (§7.10).
+          - geo-places:SearchText
+          # Baseline pedestrian route is calculated in the BROWSER with this key
+          # (decisions.md), so the key — not a Lambda — carries the routes action.
+          - geo-routes:CalculateRoutes
+        AllowResources:
+          - arn:aws:geo-maps:ap-south-1::provider/default
+          - arn:aws:geo-places:ap-south-1::provider/default
+          - arn:aws:geo-routes:ap-south-1::provider/default
+        AllowReferers:
+          # Add the Amplify domain at first hosting deploy (docs/DEPLOY.md §4a).
+          - http://localhost:5173/*
+
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: chhaya-mvp
+      # Minimal Phase 0 row over the route Lambda. ExtraMin / ShadeGainPct / cold-start
+      # widgets join in Phase 3 once EMF metrics exist (§7.9).
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {"type": "text", "x": 0, "y": 0, "width": 24, "height": 2,
+             "properties": {"markdown": "# CHHAYA MVP — Karol Bagh\nRoute API health. Region ap-south-1."}},
+            {"type": "metric", "x": 0, "y": 2, "width": 8, "height": 6,
+             "properties": {"title": "Invocations", "region": "${AWS::Region}",
+               "view": "timeSeries", "stacked": false,
+               "metrics": [["AWS/Lambda", "Invocations", "FunctionName", "${RouteFunction}"]],
+               "period": 300}},
+            {"type": "metric", "x": 8, "y": 2, "width": 8, "height": 6,
+             "properties": {"title": "Duration (p99 / avg ms)", "region": "${AWS::Region}",
+               "view": "timeSeries", "stacked": false,
+               "metrics": [["AWS/Lambda", "Duration", "FunctionName", "${RouteFunction}"]],
+               "period": 300}},
+            {"type": "metric", "x": 16, "y": 2, "width": 8, "height": 6,
+             "properties": {"title": "Errors", "region": "${AWS::Region}",
+               "view": "timeSeries", "stacked": false,
+               "metrics": [["AWS/Lambda", "Errors", "FunctionName", "${RouteFunction}"]],
+               "period": 300}}
+          ]
+        }
+
+Outputs:
+  ApiUrl:
+    Description: HTTP API base URL — curl $ApiUrl/route must return {"ok":true} (Phase 0 done-when).
+    Value: !GetAtt HttpApi.ApiEndpoint
+  BucketName:
+    Description: S3 bucket holding graph.pkl / nodes.npz / shade arrays (Phase 2).
+    Value: !Ref GraphBucket
+  LocationApiKeyArn:
+    Description: Location API key ARN — fetch the value with `aws location describe-key` (docs/DEPLOY.md §4b).
+    Value: !GetAtt LocationApiKey.Arn

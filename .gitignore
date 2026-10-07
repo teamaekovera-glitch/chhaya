@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Pipeline artefacts (large / generated — never commit)
+data/
+plots/*.png
+
+# SAM / AWS build output
+.aws-sam/
+
+# Web
+node_modules/
+web/dist/
+web/.env.production
+
+# Env files — the Location key is referer-restricted but still never committed (§7.10)
+.env
+.env.*
+!.env.example
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

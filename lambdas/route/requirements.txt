@@ -1,0 +1,11 @@
+# Route Lambda dependency set — §0 rule 5: numpy + networkx ONLY.
+# The Phase 0 stub handler imports neither (deploy smoke test must not depend on wheels);
+# the real Phase 3 route compute imports both.
+#
+# Docker is NOT available in this build environment, so plain `sam build` would host-
+# install wheels built for the host interpreter (py3.13), not the python3.12 Lambda
+# runtime. If `sam build` is used without Docker, follow the §4 fallback in
+# docs/DEPLOY.md §3 (manylinux2014 wheels, --python-version 3.12) before shipping
+# anything that imports these.
+numpy>=1.26,<3.0
+networkx>=3.2,<4.0
