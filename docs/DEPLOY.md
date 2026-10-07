@@ -84,3 +84,27 @@ aws location describe-key --key-name chhaya-location-key --include-keyholder \
 - [ ] Amplify URL shows a Location map centred on Karol Bagh (77.193, 28.6495)
 - [ ] Both URLs shared in team chat
 - [ ] $5 budget alert confirmed set
+
+## 6. Phase 2 artifact upload (pipeline/upload.py — ready-but-creds-pending)
+
+The full precompute writes S3-bound artifacts that `pipeline/upload.py` uploads in
+one pass. `graph.pkl` is upload-ONLY (multi-MB pickle, gitignored; committed
+artifacts cap at ~10 MB per the commit-data policy):
+
+| local file (data/) | bucket key | committed to git? |
+| ------------------ | ---------- | ----------------- |
+| graph.pkl | `graph/graph.pkl` | no — upload-only (see DECISIONS.md for byte size) |
+| nodes.npz | `graph/nodes.npz` | yes |
+| coverage.geojson | `graph/coverage.geojson` | yes |
+| buildings.npz | `arrays/buildings.npz` | yes (§6.4 ragged arrays) |
+| edges.npz | `arrays/edges.npz` | yes (§6.4 ragged arrays) |
+| shade_summer.npy | `shade/summer.npy` | yes (float16 (E,48)) |
+| shade_monsoon.npy | `shade/monsoon.npy` | yes (float16 (E,48)) |
+| flood.npy | `flood/flood.npy` | yes (float16 per-edge) |
+
+```bash
+python pipeline/upload.py            # dry-run: lists the plan, sends nothing
+export GRAPH_BUCKET=<bucket-name>    # explicit go-signal; bucket must exist
+python pipeline/upload.py --execute  # actual upload via the default credential chain
+```
+

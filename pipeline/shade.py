@@ -38,6 +38,7 @@ import logging
 import math
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -56,7 +57,7 @@ from shapely.ops import unary_union
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))  # config + shared imports resolve from repo root
 
-from config import AREA_NAME, SLOT_START_MINUTES
+from config import AREA_NAME, COVERAGE_CENTROID, SLOT_START_MINUTES
 
 from pipeline import solar as solar_mod
 from shared.geometry import shade_fraction, sidewalk_offset_lines
@@ -349,15 +350,171 @@ def plot_shadows(season: str, slot: int, sun: dict, b_tile: gpd.GeoDataFrame,
     return out
 
 
+# ------------------------------------------------------------------ full area
+
+def load_full_area() -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    """Buildings (with heights) and walk edges for the WHOLE bbox in UTM.
+
+    Same loading path as the test tile (no forks of the Phase 1 machinery);
+    the only difference is the extent. Edges keep their (u, v, key) identity so
+    output rows stay aligned with data/flood.parquet's edge_id ordering.
+    """
+    from config import UTM_EPSG
+
+    buildings = gpd.read_file(DATA / "buildings_heights.gpkg").to_crs(f"EPSG:{UTM_EPSG}")
+    G_utm = ox.project_graph(ox.load_graphml(RAW / "graph.graphml"), to_crs=f"EPSG:{UTM_EPSG}")
+    _, edges = ox.graph_to_gdfs(G_utm)
+    edges = edges.reset_index()
+    edges = edges[~edges.geometry.is_empty].copy()
+    log.info("full area: %d buildings / %d walk edge rows in UTM", len(buildings), len(edges))
+    if len(buildings) < 500 or len(edges) == 0:
+        raise RuntimeError("full area load produced an implausible layer - check data/raw")
+    return buildings, edges
+
+
+def build_shadows(buildings: gpd.GeoDataFrame, alt: float, az: float) -> tuple[list[Polygon], STRtree]:
+    """§7.5 shadow polygons for every building at one (alt, az) + their STRtree."""
+    shadows = [p for p in (
+        shadow_polygon(r.geometry, float(r.height_m), alt, az) for r in buildings.itertuples()
+    ) if p is not None]
+    return shadows, STRtree(shadows)
+
+
+# A shadow counts for an edge only if it can touch one of its two sidewalk
+# lines; sidewalks sit at most MAX_SIDEWALK_OFFSET_M within the centreline
+# buffer, so an empty box intersection against the buffered centreline implies
+# zero shade (necessity, never sufficiency — candidates are computed exactly).
+MAX_SIDEWALK_OFFSET_M = WIDTH_LOOKUP["motorway"] / 2.0 - 1.5  # 10.5 m
+CANDIDATE_PAD_M = MAX_SIDEWALK_OFFSET_M + 1.5  # 12 m: max offset + margin
+
+
+def candidate_boxes(e_full: gpd.GeoDataFrame):
+    """Slot-independent pre-filter boxes: centreline buffered CANDIDATE_PAD_M."""
+    return e_full.geometry.buffer(CANDIDATE_PAD_M).values
+
+
+def run_full_slot(season: str, slot: int, buildings: gpd.GeoDataFrame,
+                  e_full: gpd.GeoDataFrame, boxes, widths: np.ndarray) -> np.ndarray:
+    """Per-edge shade for one (season, slot) over the FULL area — §7.5 maths.
+
+    Returns float16 fractions in e_full's row order (aligned to edge_id).
+    Cost control per the task contract: one vectorised STRtree query against
+    the buffered-centreline boxes selects candidates (empty box intersection
+    implies zero shade, geometrically); candidates then get the exact §7.5
+    sidewalk-offset + union computation on the slot's real sun.
+    """
+    alt, az = sun_alt_az(season, slot, COVERAGE_CENTROID[0], COVERAGE_CENTROID[1])
+    out = np.zeros(len(e_full), dtype=np.float16)
+    if alt < MIN_SUN_ALT_DEG:
+        log.info("slot %02d %s: sun alt %.2f < %.0f deg -> shade 1.0 all %d edges",
+                 slot, season, alt, MIN_SUN_ALT_DEG, len(e_full))
+        out[:] = np.float16(1.0)
+        return out  # §7.5 skip: sun below floor is full shade by contract
+
+    t0 = time.perf_counter()
+    shadows, tree = build_shadows(buildings, alt, az)
+
+    hit = tree.query(boxes, predicate="intersects")  # 2 x K candidate matrix
+    cand = np.unique(hit[0]) if len(hit) else np.array([], dtype=int)
+    log.info("slot %02d %s: alt %.1f az %.0f | %d/%d candidate edges (box pre-filter), %d shadows",
+             slot, season, alt, az, len(cand), len(e_full), len(shadows))
+
+    for i in cand:
+        edge = e_full.geometry.iloc[i]
+        right, left = sidewalk_offset_lines(edge, float(widths[i]))
+        u_l = _shadow_union(left, tree, shadows)
+        u_r = _shadow_union(right, tree, shadows)
+        out[i] = np.float16(max(shade_fraction(left, u_l), shade_fraction(right, u_r)))
+
+    mean = float(out.astype(np.float32).mean())
+    wall = time.perf_counter() - t0
+    log.info("slot %02d %s: mean shade %.3f, wall %.1fs", slot, season, mean, wall)
+    return out
+
+
+def run_full_season(season: str) -> None:
+    """All 48 slots for one season; writes data/shade_{season}.npy (E, 48) float16.
+
+    Serial first, per-slot wall time logged; the task's 45-minute budget decides
+    whether the multiprocessing path (per-slot workers, max 4) replaces it.
+    """
+    from config import SLOTS
+
+    buildings, e_full = load_full_area()
+    boxes = candidate_boxes(e_full)
+    widths = np.array([width_for(h) if h else WIDTH_DEFAULT_M for h in e_full["highway"].values])
+
+    arr = np.empty((len(e_full), SLOTS), dtype=np.float16)
+    per_slot: list[float] = []
+    for slot in range(SLOTS):
+        t0 = time.perf_counter()
+        arr[:, slot] = run_full_slot(season, slot, buildings, e_full, boxes, widths)
+        per_slot.append(time.perf_counter() - t0)
+        log.info("season %s: %d/48 slots done, this slot %.1fs", season, slot + 1, per_slot[-1])
+
+    total = sum(per_slot)
+    log.info("season %s TOTAL %.1f min serial (avg %.1f s/slot)", season, total / 60.0, total / max(SLOTS, 1))
+    if not np.isfinite(arr.astype(np.float32)).all():
+        raise RuntimeError(f"shade_{season} contains NaN/inf - refusing to write")
+    out = DATA / f"shade_{season}.npy"
+    np.save(out, arr)
+    log.info("wrote %s shape %s %s", out, arr.shape, arr.dtype)
+
+
+def plot_shadows_full(season: str, slot: int, buildings: gpd.GeoDataFrame,
+                      e_full: gpd.GeoDataFrame, shade_arr: np.ndarray) -> Path:
+    """Full-area shadow plot — same style as the test-tile gate plots (§7.5)."""
+    alt, az = sun_alt_az(season, slot, COVERAGE_CENTROID[0], COVERAGE_CENTROID[1])
+    from config import UTM_EPSG
+
+    fig, ax = plt.subplots(figsize=(13, 8), dpi=150)
+    if alt >= MIN_SUN_ALT_DEG:
+        shadows, _tree = build_shadows(buildings, alt, az)
+        if shadows:
+            gpd.GeoSeries(pd.Series(shadows), crs=f"EPSG:{UTM_EPSG}").plot(
+                ax=ax, color="#252525", alpha=0.40, edgecolor="none", zorder=2,
+            )
+    buildings.plot(ax=ax, color="#9e9e9e", edgecolor="#666666", linewidth=0.2, zorder=3)
+    merged = e_full.assign(shade=shade_arr[:, slot])
+    cmap = "Greens" if season == "summer" else "Purples"
+    merged.plot(ax=ax, column="shade", cmap=cmap, linewidth=1.0, vmin=0.0, vmax=1.0,
+                zorder=4, legend=True,
+                legend_kwds={"label": "edge shade fraction (max of 2 sidewalks)", "shrink": 0.55})
+    cx, cy = e_full.geometry.union_all().centroid.x, e_full.geometry.union_all().centroid.y
+    if alt > 0:
+        arrow = 250.0
+        ax.annotate(
+            "", xy=(cx + arrow * math.sin(math.radians(az)) / 2, cy + arrow * math.cos(math.radians(az)) / 2),
+            xytext=(cx - arrow * math.sin(math.radians(az)) / 2, cy - arrow * math.cos(math.radians(az)) / 2),
+            arrowprops={"arrowstyle": "->", "color": "#e8a33d", "lw": 3}, zorder=10,
+        )
+        ax.text(cx, cy - 90, f"sun\naz {az:.0f}° alt {alt:.1f}°",
+                color="#8a5a10", fontsize=9, ha="center", va="top", zorder=11)
+    ax.set_title(f"{AREA_NAME} FULL AREA — {season} slot {slot:02d} "
+                 f"(sun az {az:.0f}°, alt {alt:.1f}°)")
+    ax.set_aspect("equal")
+    PLOTS.mkdir(parents=True, exist_ok=True)
+    out = PLOTS / f"shadows_full_{season}_{slot:02d}.png"
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    log.info("wrote %s", out)
+    return out
+
+
 # ---------------------------------------------------------------------- CLI
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="CHHAYA Phase 1 - test-tile shade engine (§7.5)")
-    ap.add_argument("--test-tile", action="store_true", required=True,
-                    help="run the 500 m test tile at the coverage centroid (Phase 1 scope)")
+    ap = argparse.ArgumentParser(description="CHHAYA shade engine (§7.5) - test tile + full area")
+    mode = ap.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--test-tile", action="store_true",
+                      help="run the 500 m test tile at the coverage centroid (Phase 1 scope)")
+    mode.add_argument("--full", action="store_true",
+                      help="run the FULL Karol Bagh area, all 48 slots (Phase 2 scope)")
     ap.add_argument("--season", choices=["summer", "monsoon"], required=True)
     ap.add_argument("--slots", default=",".join(str(s) for s in GATE_SLOTS),
-                    help="comma-separated slot indices (default: the five gate slots)")
+                    help="comma-separated slot indices (test-tile mode only)")
+    ap.add_argument("--full-plots", action="store_true",
+                    help="also render the full-area gate plots (slots 0/16/24/32/44)")
     ap.add_argument("--local-sun", action="store_true",
                     help="permit the interim CHHAYA_LOCAL_SUN=1 fallback for this run "
                          "(flag sets the env var; shared/solar_numpy.py stays canonical)")
@@ -365,6 +522,15 @@ def main() -> None:
 
     if args.local_sun:
         os.environ["CHHAYA_LOCAL_SUN"] = "1"
+
+    if args.full:
+        run_full_season(args.season)
+        if args.full_plots:
+            buildings, e_full = load_full_area()
+            arr = np.load(DATA / f"shade_{args.season}.npy")
+            for slot in GATE_SLOTS:
+                plot_shadows_full(args.season, slot, buildings, e_full, arr)
+        return
 
     b_tile, e_tile, (cx, cy) = load_test_tile()
 

@@ -54,3 +54,34 @@
   kwargs; numpy pinned <2.2 for pysheds (`np.in1d` removal).
 - **Human gate PENDING**: the ten shadow PNGs (5 summer + 5 monsoon) still need eyes
   that did not write the code before Phase 2 starts.
+
+## Phase 2 — full-area precompute + graph assembly (2026-10-07)
+
+- **Full-area shade run completed**: Karol Bagh bbox, 4,663 buildings / 10,662 edges,
+  both seasons × 48 slots = 96 computations, `data/shade_{summer,monsoon}.npy` float16
+  (10662, 48). Run fully SERIAL at ~2.1–3.5 s/slot (~2.5 min/season, ~5 min total) —
+  far under the task's 45 min threshold, so no slot parallelism was added.
+- **Pre-filter rewrite (correctness first)**: the first draft pre-selected candidate
+  edges via a half-day *mean-sun* shadow tree; that tree is not a geometric superset
+  of a slot's shadows (mean azimuth ≠ covering azimuth), so it could produce false
+  zeros. Replaced with a sound necessity test: each centreline buffered by
+  12 m (max sidewalk offset 10.5 m + margin) is tested once against each slot's own
+  shadow STRtree (vectorised). An empty box-intersection there implies zero shade
+  geometrically; ~40% of edges are skipped at noon, ~25% at low sun.
+- **§7.6 sanity gate numbers** (full area, summer): mean slot 04 (08:00) > mean slot 24
+  (13:00) < mean slot 44 (18:00) — monotonicity holds; underpass shade == 1.0 (vacuous:
+  0 underpasses in Karol Bagh); flood_risk in [0,1]; arrays NaN-free; largest weakly
+  connected component >= 95% of nodes. Full table in build_graph stdout / test run.
+- **shapely 2.2 ragged payload**: `to_ragged_array` returns a variable-arity third
+  element — a 1-tuple (offsets) for pure linework, 2-tuple (type codes, offsets) for
+  polygons. `export_arrays.py` persists it slot-by-slot (`types_0..N` + `n_types`) and
+  round-trips BOTH npz files through `from_ragged_array` with area/length equality
+  asserts. This is the exact Phase 5 Lambda load path; it is verified once here so the
+  Lambda contract is proven, not assumed.
+- **graph.pkl stays gitignored (upload-only)**; committed data artifacts are the small
+  §6.3/§6.4 files (see `.gitignore` allowlist + DEPLOY.md §6). Byte sizes are recorded
+  in `data/graph_stats.json` (gitignored, printed in build logs) and in the PR body.
+- **upload.py is write-guarded**: refuses to run without GRAPH_BUCKET env + explicit
+  `--execute`; default is a dry-run listing. Logged in BLOCKERS.md as
+  ready-but-creds-pending.
+

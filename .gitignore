@@ -6,7 +6,15 @@ __pycache__/
 .pytest_cache/
 
 # Pipeline artefacts (large / generated — never commit)
-data/
+data/*
+!data/flood.npy
+!data/shade_summer.npy
+!data/shade_monsoon.npy
+!data/buildings.npz
+!data/edges.npz
+!data/nodes.npz
+!data/coverage.geojson
+# data/raw/ stays ignored wholesale (11 MB of inputs, reproducible via fetch_osm)
 plots/*.png
 
 # SAM / AWS build output
@@ -26,3 +34,11 @@ web/.env.production
 .vscode/
 .idea/
 .DS_Store
+
+# Phase 2: graph.pkl is upload-only (multi-MB pickle), not committable (task contract)
+data/graph.pkl
+data/graph_stats.json
+data/buildings_heights.gpkg
+data/dem_utm.tif
+data/flood.parquet
+data/flood_stats.json
