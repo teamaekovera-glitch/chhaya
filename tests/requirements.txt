@@ -1,0 +1,8 @@
+# Test-only dependencies — pytest suite for the Phase 1 math gates (§9).
+# These are NEVER Lambda runtime deps (§0 rule 5: Lambda = numpy + networkx for
+# route, numpy + shapely for shade). pvlib exists here to independently verify
+# shared/solar_numpy.py; pandas rides in as pvlib's hard dependency.
+pytest>=8.0
+numpy>=1.26
+shapely>=2.0
+pvlib>=0.11
