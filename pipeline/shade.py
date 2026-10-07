@@ -309,7 +309,7 @@ def plot_shadows(season: str, slot: int, sun: dict, b_tile: gpd.GeoDataFrame,
             for r in b_tile.itertuples()
         ) if p is not None]
 
-    fig, ax = plt.subplots(figsize=(11, 11), dpi=110)
+    fig, ax = plt.subplots(figsize=(11, 11), dpi=160)
     if shadows:
         gpd.GeoSeries(pd.Series(shadows), crs=f"EPSG:{UTM_EPSG}").plot(
             ax=ax, color="#252525", alpha=0.40, edgecolor="none", zorder=2,

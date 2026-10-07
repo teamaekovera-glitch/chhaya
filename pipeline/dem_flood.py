@@ -383,7 +383,7 @@ def plot_flood_map(edges: gpd.GeoDataFrame) -> Path:
     buildings = gpd.read_file(DATA / "buildings_heights.gpkg").to_crs(f"EPSG:{UTM_EPSG}")
     edges_utm = edges.to_crs(f"EPSG:{UTM_EPSG}")
 
-    fig, ax = plt.subplots(figsize=(12, 12), dpi=110)
+    fig, ax = plt.subplots(figsize=(12, 12), dpi=160)
     buildings.plot(ax=ax, color="#d9d9d9", edgecolor="none", zorder=1)
     edges_utm.plot(
         ax=ax, column="flood_risk", cmap="Blues", linewidth=1.6, zorder=2,
