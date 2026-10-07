@@ -1,0 +1,18 @@
+# Phase 1 pipeline requirements — laptop only, NEVER shipped to Lambda
+# (§0 rule 5: Lambda keeps numpy + networkx / numpy + shapely only).
+# Targets Python 3.12 semantics; developed on 3.13 with identical API surface.
+ruff
+pytest
+# geospatial analysis stack
+geopandas>=1.0
+shapely>=2.0
+rasterio>=1.4
+pysheds>=0.4
+pvlib>=0.12
+osmnx>=2.0
+numpy>=1.26,<2.2  # pysheds 0.5 calls np.in1d, removed in numpy 2.2
+pandas
+networkx
+pyarrow
+matplotlib
+boto3
