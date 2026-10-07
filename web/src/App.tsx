@@ -173,9 +173,19 @@ export default function App() {
     return out
   }, [mode, directResult, optimizedResult, baseline])
 
+  /** Sparkline = shade_profile (§6.7). The contract carries no per-slot flood
+   *  series (flood_profile is a scalar pair), so the curve is drawn only when
+   *  shade is what the mode routes on — omitted in monsoon. */
   const profileForStrip = useMemo(
-    () => (mode !== 'direct' && optimizedResult ? optimizedResult.shade_profile : directResult?.shade_profile),
-    [mode, optimizedResult, directResult],
+    () =>
+      mode !== 'direct' && optimizedResult
+        ? season === 'summer'
+          ? optimizedResult.shade_profile
+          : undefined
+        : season === 'summer'
+          ? directResult?.shade_profile
+          : undefined,
+    [mode, season, optimizedResult, directResult],
   )
 
   return (

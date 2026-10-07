@@ -81,6 +81,12 @@ export function drawRouteLines(map: MapLibreMap, lines: RouteLine[]): void {
         },
       })
     }
+    // Paint is fixed at layer creation — a season switch (summer→monsoon)
+    // must update paint or the map silently keeps the old palette.
+    if (map.getLayer(layerId)) {
+      map.setPaintProperty(layerId, 'line-color', line.color)
+      map.setPaintProperty(layerId, 'line-width', line.width)
+    }
   }
 }
 
