@@ -107,17 +107,61 @@ Resources:
           # Add the Amplify domain at first hosting deploy (docs/DEPLOY.md §4a).
           - http://localhost:5173/*
 
+  PrecomputeHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      # Phase 5 (§7.9 shade pipeline): Step Functions step. On the MVP the shade
+      # compute itself runs OFFLINE (pipeline/shade.py), so this handler is the
+      # stub a future real compute swaps in for — it keeps the SAME bucket/key
+      # env names as RouteFunction so the swap needs no state-machine change.
+      CodeUri: ../lambdas/precompute_handler/
+      Handler: handler.lambda_handler
+      MemorySize: 512
+      Description: Precompute step for the re-precompute state machine (manifest + bundle minimums check).
+      Environment:
+        Variables:
+          GRAPH_BUCKET: !Ref GraphBucket
+          S3_KEY_GRAPH: graph/graph.pkl
+      Policies:
+        # head_object resolves through s3:GetObject; the manifest write needs
+        # s3:PutObject — S3CrudPolicy covers both, scoped to GraphBucket.
+        - S3CrudPolicy:
+            BucketName: !Ref GraphBucket
+
+  PrecomputeStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      # §4 hard constraint: STANDARD workflow (4,000 free transitions/month —
+      # never EXPRESS, which bills per request).
+      Type: STANDARD
+      DefinitionUri: statemachine.asl.json
+      # The ${...} placeholders inside statemachine.asl.json are resolved here
+      # at deploy (SAM Developer Guide: AWS::Serverless::StateMachine,
+      # DefinitionSubstitutions) — verified against live docs before writing.
+      DefinitionSubstitutions:
+        PrecomputeHandlerArn: !GetAtt PrecomputeHandlerFunction.Arn
+      Tracing:
+        Enabled: true
+      Policies:
+        # The state machine invokes exactly one function: PrecomputeHandlerFunction.
+        - LambdaInvokePolicy:
+            FunctionName: !Ref PrecomputeHandlerFunction
+
   Dashboard:
     Type: AWS::CloudWatch::Dashboard
     Properties:
       DashboardName: chhaya-mvp
-      # Minimal Phase 0 row over the route Lambda. ExtraMin / ShadeGainPct / cold-start
-      # widgets join in Phase 3 once EMF metrics exist (§7.9).
+      # §7.9 metric set, extended in Phase 5 (task contract):
+      #   row 0 — text header + ops notes;
+      #   row 1 — RouteFunction Invocations / Duration / Errors (the Phase 0 row, kept);
+      #   row 2 — Step Functions ExecutionsStarted/ExecutionsFailed + HttpApi 4xx/5xx.
+      # All regions resolve from ${AWS::Region} — region-agnostic by construction.
       DashboardBody: !Sub |
         {
           "widgets": [
             {"type": "text", "x": 0, "y": 0, "width": 24, "height": 2,
-             "properties": {"markdown": "# CHHAYA MVP — Karol Bagh\nRoute API health. Region ap-south-1."}},
+             "properties": {"title": "CHHAYA operational notes",
+               "markdown": "# CHHAYA MVP — Karol Bagh\nRoute API health + re-precompute pipeline (Phase 5). Ops note: the $5 budget alert must precede every deploy; open blockers live in docs/BLOCKERS.md (Phase 5 adds none)."}},
             {"type": "metric", "x": 0, "y": 2, "width": 8, "height": 6,
              "properties": {"title": "Invocations", "region": "${AWS::Region}",
                "view": "timeSeries", "stacked": false,
@@ -132,6 +176,22 @@ Resources:
              "properties": {"title": "Errors", "region": "${AWS::Region}",
                "view": "timeSeries", "stacked": false,
                "metrics": [["AWS/Lambda", "Errors", "FunctionName", "${RouteFunction}"]],
+               "period": 300}},
+            {"type": "metric", "x": 0, "y": 8, "width": 8, "height": 6,
+             "properties": {"title": "Pipeline executions started / failed", "region": "${AWS::Region}",
+               "view": "timeSeries", "stacked": false,
+               "metrics": [
+                 ["AWS/States", "ExecutionsStarted", "StateMachineArn", "${PrecomputeStateMachine}"],
+                 ["AWS/States", "ExecutionsFailed", "StateMachineArn", "${PrecomputeStateMachine}"]
+               ],
+               "period": 300}},
+            {"type": "metric", "x": 16, "y": 8, "width": 8, "height": 6,
+             "properties": {"title": "HTTP API 4xx / 5xx", "region": "${AWS::Region}",
+               "view": "timeSeries", "stacked": false,
+               "metrics": [
+                 ["AWS/HttpApi", "4xx", "ApiId", "${HttpApi}"],
+                 ["AWS/HttpApi", "5xx", "ApiId", "${HttpApi}"]
+               ],
                "period": 300}}
           ]
         }
