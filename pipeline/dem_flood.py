@@ -48,12 +48,9 @@ import numpy as np
 import osmnx as ox
 import pandas as pd
 import rasterio
-from rasterio.features import rasterize
-from rasterio.warp import Resampling, calculate_default_transform, reproject
+from config import BBOX, UTM_EPSG
 from scipy.stats import rankdata
 from shapely.geometry import Point, mapping
-
-from config import BBOX, UTM_EPSG
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("dem_flood")
@@ -101,9 +98,16 @@ def discover_tif_key() -> str:
         )
     log.info("objects under stem:\n%s", json.dumps(keys, indent=2))
     tifs = [k for k in keys if k.endswith(".tif")]
-    if not tifs:
-        raise FileNotFoundError(f"no .tif object under {prefix} (found: {keys})")
-    return tifs[0]
+    # The tile contains auxiliary rasters (AUXFILES/EDM etc.) whose data are
+    # flag values, not elevations - the main DEM object is named exactly
+    # "<stem>.tif" under the stem's DEM/ folder. Filtering to it is the fix
+    # for picking an auxiliary mask and reading -9999 everywhere.
+    main = [k for k in tifs if k.endswith(f"{DEM_STEM}.tif")]
+    if not main:
+        raise FileNotFoundError(
+            f"main DEM object <{DEM_STEM}.tif> not found under {prefix} (all keys: {keys})"
+        )
+    return main[0]
 
 
 def fetch_dem_window(dst: Path) -> tuple[float, float]:
@@ -111,7 +115,8 @@ def fetch_dem_window(dst: Path) -> tuple[float, float]:
 
     Returns the (cell_width_m, cell_height_m) of the saved UTM raster.
     """
-    from rasterio.windows import Window, bounds as window_bounds, from_bounds
+    from rasterio.enums import Resampling
+    from rasterio.vrt import WarpedVRT
 
     west, south, east, north = BBOX
     key = discover_tif_key()
@@ -120,34 +125,42 @@ def fetch_dem_window(dst: Path) -> tuple[float, float]:
 
     lat_pad = MARGIN_M / 111_000.0
     lon_pad = MARGIN_M / (111_000.0 * float(np.cos(np.deg2rad((south + north) / 2))))
-    with rasterio.Env(AWS_NO_SIGN_REQUEST="YES"):
-        with rasterio.open(url) as src:
-            win = (
-                from_bounds(west - lon_pad, south - lat_pad, east + lon_pad, north + lat_pad, src.transform)
-                .round_offsets()
-                .round_lengths()
-                .intersection(Window(0, 0, src.width, src.height))
-            )
-            dem_in = src.read(1, window=win).astype(np.float32)
-            src_transform = src.window_transform(win)
-            src_crs = src.crs
-            src_nodata = src.nodata if src.nodata is not None else -9999.0
-            log.info("window %dx%d cells, crs=%s, nodata=%s", win.width, win.height, src_crs, src_nodata)
+    # WarpedVRT reprojects on read - rasterio.warp.reproject on this tile
+    # window emitted all-nodata despite success return codes (probed before
+    # committing), so bounds go in as an explicit transform: the
+    # left/bottom/right/top keywords are NOT WarpedVRT parameters and a
+    # loose-kwargs call silently ignores them.
+    import pyproj
+    from rasterio.transform import Affine
 
-    utm_transform, utm_w, utm_h = calculate_default_transform(
-        src_crs, f"EPSG:{UTM_EPSG}", int(win.width), int(win.height), *window_bounds(win, src_transform)
+    tr = pyproj.Transformer.from_crs(4326, UTM_EPSG, always_xy=True)
+    xs, ys = tr.transform(
+        [west - lon_pad, east + lon_pad, west - lon_pad, east + lon_pad],
+        [south - lat_pad, south - lat_pad, north + lat_pad, north + lat_pad],
     )
-    dem_utm = np.full((utm_h, utm_w), src_nodata, dtype=np.float32)
-    reproject(
-        source=dem_in,
-        destination=dem_utm,
-        src_transform=src_transform,
-        src_crs=src_crs,
-        dst_transform=utm_transform,
-        dst_crs=f"EPSG:{UTM_EPSG}",
-        dst_nodata=src_nodata,
+    xmin, xmax = min(xs), max(xs)
+    ymin, ymax = min(ys), max(ys)
+    grid_res = 28.5  # ~248 E x 203 N cells over bbox + margin
+    vrt_width = int(np.ceil((xmax - xmin) / grid_res))
+    vrt_height = int(np.ceil((ymax - ymin) / grid_res))
+    vrt_transform = Affine(grid_res, 0, xmin, 0, -grid_res, ymax)
+    with rasterio.Env(AWS_NO_SIGN_REQUEST="YES"), rasterio.open(url) as src, WarpedVRT(
+        src,
+        crs=f"EPSG:{UTM_EPSG}",
         resampling=Resampling.bilinear,
-    )
+        transform=vrt_transform,
+        width=vrt_width,
+        height=vrt_height,
+    ) as vrt:
+        dem_utm = vrt.read(1).astype(np.float32)
+        utm_transform = vrt.transform
+        utm_h, utm_w = dem_utm.shape
+        src_nodata = vrt.nodata if vrt.nodata is not None else -9999.0
+        valid = int((dem_utm != src_nodata).sum())
+    log.info("vrt %dx%d UTM cells, nodata=%s, valid=%d", utm_w, utm_h, src_nodata, valid)
+    if valid == 0:
+        raise RuntimeError("WarpedVRT read produced no valid DEM cells - tile/window mismatch")
+
     dst.parent.mkdir(parents=True, exist_ok=True)
     meta = {
         "driver": "GTiff",
@@ -160,7 +173,9 @@ def fetch_dem_window(dst: Path) -> tuple[float, float]:
         "nodata": src_nodata,
     }
     with rasterio.open(dst, "w", **meta) as out:
-        out.write(dem_utm)
+        # rasterio 1.5 requires band-stacked (1, h, w) input for write();
+        # write_band(1, 2d) is the 1.3-compatible idiom that works in both.
+        out.write_band(1, dem_utm)
     cell_w, cell_h = float(utm_transform.a), float(abs(utm_transform.e))
     log.info("wrote %s (%dx%d UTM cells, cell=%.2f x %.2f m)", dst, utm_w, utm_h, cell_w, cell_h)
     return cell_w, cell_h
@@ -177,13 +192,14 @@ def water_burn_mask(shape: tuple[int, int], transform) -> np.ndarray:
     polys = water[water.geometry.geom_type.isin(("Polygon", "MultiPolygon"))].geometry
     lines = water[water.geometry.geom_type.isin(("LineString", "MultiLineString"))].geometry.buffer(5.0)
     to_burn = gpd.GeoSeries(pd.concat([polys, lines], ignore_index=True), crs=f"EPSG:{UTM_EPSG}")
-    mask = rasterize(
+    from rasterio.features import rasterize as _rasterize
+    mask = _rasterize(
         [(mapping(g), 1) for g in to_burn if not g.is_empty],
         out_shape=shape,
         transform=transform,
         fill=0,
         all_touched=True,
-        dtype=np.uint8,
+        dtype="uint8",
     )
     log.info("water burn mask covers %d cells", int(mask.sum()))
     return mask
@@ -191,15 +207,21 @@ def water_burn_mask(shape: tuple[int, int], transform) -> np.ndarray:
 
 def hydrology(dst: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """pysheds HAND + TWI + accumulation over the water-burned UTM DEM."""
-    import pysheds
+    from pysheds import sgrid
 
-    grid = pysheds.Grid.from_raster(str(dst))
-    dem = grid.read_raster(str(dst)).astype("float64")
+    grid = sgrid.sGrid.from_raster(str(dst))
+    dem = grid.read_raster(str(dst))  # pysheds Raster (fill_pits etc. need .nodata)
     cell_w, cell_h = float(grid.affine.a), float(abs(grid.affine.e))
     log.info("pysheds grid %dx%d, cell=%.2f x %.2f m", grid.shape[1], grid.shape[0], cell_w, cell_h)
 
     water_mask = water_burn_mask(dem.shape, grid.affine)
-    dem = np.where(water_mask == 1, dem + WATER_BURN_M, dem)
+    if water_mask.any():
+        burned = np.where(water_mask == 1, dem + WATER_BURN_M, dem)
+        if not isinstance(burned, sgrid.Raster):
+            burned = sgrid.Raster(np.asarray(burned), grid.viewfinder)
+        dem = burned
+    else:
+        log.info("no water cells - DEM unmodified")
 
     nodata = grid.nodata
     filled = grid.fill_pits(dem)
@@ -325,6 +347,7 @@ def build_edge_table(hand: np.ndarray, twi: np.ndarray, transform, hydro_info: d
     edges["is_underpass"] = (tunnel | (layer_num < 0)).to_numpy()
     bridge_col = edges.get("bridge", pd.Series(False, index=edges.index))
     bridge = bridge_col.astype(str).str.lower().isin({"yes", "true", "viaduct", "aqueduct"}).to_numpy()
+    edges["is_bridge"] = bridge
 
     # hotspot boost by UTM midpoint
     mids = [g.interpolate(0.5, normalized=True) for g in edges.geometry]
@@ -337,7 +360,7 @@ def build_edge_table(hand: np.ndarray, twi: np.ndarray, transform, hydro_info: d
 
     summary = {
         **hydro_info,
-        "edges": int(len(out_wgs)),
+        "edges": len(out_wgs),
         "edges_outside_dem": {"hand": n_hand_out, "twi": n_twi_out},
         "flood_risk_mean": float(out_wgs["flood_risk"].mean()),
         "flood_risk_p90": float(out_wgs["flood_risk"].quantile(0.9)),

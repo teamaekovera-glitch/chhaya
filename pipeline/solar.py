@@ -42,7 +42,8 @@ def solar_position(times_ist, lon: float, lat: float) -> tuple[np.ndarray, np.nd
     """Altitude (deg, 0..90) and azimuth (deg, 0..360 from north, clockwise) per time."""
     from shared.solar_numpy import solar_position  # tests-worker-owned canonical port
 
-    alt, az = solar_position(_to_utc_index(times_ist), lon, lat)
+    # Shared canon signature is (lat, lon, when_utc); it accepts array-like times.
+    alt, az = solar_position(lat, lon, _to_utc_index(times_ist))
     return np.asarray(alt, dtype=float), np.asarray(az, dtype=float)
 
 

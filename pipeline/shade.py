@@ -50,15 +50,17 @@ import numpy as np
 import osmnx as ox
 import pandas as pd
 from shapely import STRtree
-from shapely.affinity import translate
 from shapely.geometry import LineString, Polygon
 from shapely.ops import unary_union
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))  # config imports resolve from repo root
+sys.path.insert(0, str(ROOT))  # config + shared imports resolve from repo root
 
-from config import AREA_NAME, SLOT_START_MINUTES  # noqa: E402
-from pipeline import solar as solar_mod  # noqa: E402
+from config import AREA_NAME, SLOT_START_MINUTES
+
+from pipeline import solar as solar_mod
+from shared.geometry import shade_fraction, sidewalk_offset_lines
+from shared.shadow import shadow_sweep_polygon
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("shade")
@@ -198,62 +200,33 @@ def sun_alt_az(season: str, slot: int, lon: float, lat: float) -> tuple[float, f
     except ImportError as exc:
         log.error("shared solar module unavailable (%s) - falling back behind the env guard", exc)
         alt, az = local_sun([ist_time(season, slot)], lon, lat)
-    return float(np.asarray(alt)[0]), float(np.asarray(az)[0])
+    # Shared canon returns 0-d scalars for a single timestamp.
+    return float(np.asarray(alt).reshape(-1)[0]), float(np.asarray(az).reshape(-1)[0])
 
 
 # ---------------------------------------------------------------- shadow math
+# Per §7.5 the canonical shadow/geometry math lives in shared/shadow.py and
+# shared/geometry.py (merged via PR #2); these are thin adapters, never forks.
 
 def shadow_polygon(footprint: Polygon, height_m: float, alt_deg: float, az_deg: float) -> Polygon | None:
-    """§7.5 shadow polygon of a building footprint (UTM metres).
-
-    Union of the footprint, its translated copy, and one quad per exterior
-    edge; simplified at 0.5 m tolerance.
-    """
-    if alt_deg <= MIN_SUN_ALT_DEG or height_m <= 0:
-        return None
-    length = min(height_m / math.tan(math.radians(alt_deg)), SHADOW_MAX_M)
-    theta = math.radians(az_deg + 180.0)  # shadow direction: away from the sun
-    dx, dy = length * math.sin(theta), length * math.cos(theta)
-    moved = translate(footprint, dx, dy)
-    parts = [footprint, moved]
-    ring = list(footprint.exterior.coords)[:-1]
-    n = len(ring)
-    for i in range(n):
-        (x1, y1), (x2, y2) = ring[i], ring[(i + 1) % n]
-        parts.append(Polygon([(x1, y1), (x2, y2), (x2 + dx, y2 + dy), (x1 + dx, y1 + dy)]))
-    poly = unary_union(parts).simplify(SIMPLIFY_TOL_M)
-    return poly if not poly.is_empty else None
-
-
-def sidewalk_lines(centre_line: LineString, width_m: float) -> list[LineString]:
-    """Two sidewalk offsets per §7.5; fallback to the centreline if offsets fail."""
-    offset = max(1.0, width_m / 2.0 - 1.5)
-    try:
-        left = centre_line.offset_curve(offset)
-        right = centre_line.offset_curve(-offset)
-        if left.is_empty or right.is_empty:
-            raise ValueError("empty offset curve")
-        return [left, right]
-    except Exception as exc:  # shapely raises on self-intersections / tiny geometries
-        log.debug("offset_curve fallback -> centreline (%s)", exc)
-        return [centre_line]
-
-
-def shaded_length_fraction(line: LineString, tree: STRtree, shadows: list[Polygon]) -> float:
-    """Fraction of a line inside the union of its candidate shadow polygons."""
-    if line.is_empty or line.length <= 0 or not shadows:
-        return 0.0
-    idxs = tree.query(line, predicate="intersects")
-    if len(idxs) == 0:
-        return 0.0
-    union = unary_union([shadows[i] for i in np.atleast_1d(idxs)])
-    covered = line.intersection(union).length
-    return float(min(covered / line.length, 1.0))
+    """§7.5 shadow polygon of a building footprint (UTM metres)."""
+    return shadow_sweep_polygon(footprint, alt_deg, az_deg, height_m=height_m)
 
 
 def edge_shade(centre_line: LineString, width_m: float, tree: STRtree, shadows: list[Polygon]) -> float:
     """edge shade = max of the two sidewalk fractions (walker picks the shady side)."""
-    return max(shaded_length_fraction(side, tree, shadows) for side in sidewalk_lines(centre_line, width_m))
+    return max(
+        shade_fraction(side, _shadow_union(side, tree, shadows))
+        for side in sidewalk_offset_lines(centre_line, width_m)
+    )
+
+
+def _shadow_union(side: LineString, tree: STRtree, shadows: list[Polygon]):
+    """Union of the shadow polygons whose STRtree candidates intersect `side`."""
+    idxs = tree.query(side, predicate="intersects")
+    if len(idxs) == 0:
+        return None
+    return unary_union([shadows[i] for i in np.atleast_1d(idxs)])
 
 
 # ------------------------------------------------------------------ test tile
@@ -262,13 +235,14 @@ def load_test_tile() -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame, tuple[float, f
     """Buildings (with heights) and walk edges clipped to a 500 m UTM square
     centred on COVERAGE_CENTROID. Edges are clipped to the tile so shade
     fractions measure only the in-tile walk stretch."""
-    from config import COVERAGE_CENTROID, UTM_EPSG
-
     import pyproj
+    from config import COVERAGE_CENTROID, UTM_EPSG
 
     buildings = gpd.read_file(DATA / "buildings_heights.gpkg").to_crs(f"EPSG:{UTM_EPSG}")
     G_utm = ox.project_graph(ox.load_graphml(RAW / "graph.graphml"), to_crs=f"EPSG:{UTM_EPSG}")
     _, edges = ox.graph_to_gdfs(G_utm)
+    # u/v/key live in the edges MultiIndex; gpd.clip drops it, so flatten first.
+    edges = edges.reset_index()
 
     lon, lat = COVERAGE_CENTROID
     cx, cy = pyproj.Transformer.from_crs(4326, f"EPSG:{UTM_EPSG}", always_xy=True).transform(lon, lat)

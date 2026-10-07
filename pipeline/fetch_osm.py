@@ -23,7 +23,6 @@ from pathlib import Path
 
 import geopandas as gpd
 import osmnx as ox
-
 from config import AREA_NAME, BBOX
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
