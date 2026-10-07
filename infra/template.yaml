@@ -28,14 +28,27 @@ Resources:
     Properties:
       CodeUri: ../lambdas/route/
       Handler: handler.lambda_handler
-      # §4: one full vCPU for the route Lambda (faster cold start).
-      MemorySize: 1769
+      # Phase 3 task contract: 1024 MB / 30 s (overrides the Globals defaults below).
+      MemorySize: 1024
       # HTTP API caps integration at 30 s (§4).
-      Timeout: 25
+      Timeout: 30
       Environment:
         Variables:
           GRAPH_BUCKET: !Ref GraphBucket
+          # S3 keys mirror pipeline/upload.py's bucket layout (§6 of DEPLOY.md) —
+          # the upload tool writes graph/graph.pkl etc., not data/*.
+          S3_KEY_GRAPH: graph/graph.pkl
+          S3_KEY_SHADE_SUMMER: shade/summer.npy
+          S3_KEY_SHADE_MONSOON: shade/monsoon.npy
+          S3_KEY_FLOOD: flood/flood.npy
+          S3_KEY_COVERAGE: graph/coverage.geojson
+          # Phase 3 brief: 1.1 m/s walk speed (overrides §6.6's 1.3).
+          WALK_SPEED_MPS: "1.1"
       Policies:
+        # Cold-start reads of the routing bundle (graph.pkl + shade/flood arrays
+        # + coverage polygon). No geo-routes IAM here by design: the baseline
+        # CalculateRoutes call runs in the BROWSER with the referer-restricted
+        # LocationApiKey (docs/DECISIONS.md).
         - S3ReadPolicy:
             BucketName: !Ref GraphBucket
       Events:
@@ -45,6 +58,12 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /route
             Method: any
+        RouteStatsApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /route/stats
+            Method: GET
 
   HttpApi:
     Type: AWS::Serverless::HttpApi
