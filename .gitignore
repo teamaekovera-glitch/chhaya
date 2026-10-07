@@ -26,3 +26,6 @@ web/.env.production
 .vscode/
 .idea/
 .DS_Store
+
+# Phase 2: graph.pkl is upload-only (multi-MB pickle), not committable (task contract)
+data/graph.pkl
