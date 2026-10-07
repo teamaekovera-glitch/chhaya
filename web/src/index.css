@@ -3,6 +3,11 @@
   --paper: #fffefb;
   --accent: #0f766e;
   --hairline: #e7e5e4;
+  --muted: #57534e;
+  --direct: #a8a29e;
+  --chhaya-summer: #0d9488;
+  --chhaya-monsoon: #2563eb;
+  --baseline: #d6d3d1;
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', sans-serif;
 }
 
@@ -21,6 +26,7 @@ body,
 .app {
   position: relative;
   height: 100%;
+  height: 100dvh;
 }
 
 .map {
@@ -51,15 +57,294 @@ body,
 .title-card p {
   margin: 0.15rem 0 0;
   font-size: 0.78rem;
-  color: #57534e;
+  color: var(--muted);
 }
 
+/* Control card: bottom sheet on phones, side-docked from 760px. */
+.route-card {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  width: min(480px, calc(100% - 1rem));
+  max-height: min(62dvh, 640px);
+  overflow-y: auto;
+  background: var(--paper);
+  border: 1px solid var(--hairline);
+  border-radius: 14px 14px 0 0;
+  padding: 0.85rem 1rem 1rem;
+  box-shadow: 0 -2px 16px rgb(0 0 0 / 14%);
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+@media (min-width: 760px) {
+  .route-card {
+    top: 5.2rem;
+    bottom: auto;
+    left: 0.9rem;
+    transform: none;
+    border-radius: 14px;
+    max-height: calc(100dvh - 6.5rem);
+  }
+}
+
+/* Place pickers */
+.place-picker {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.place-picker label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.place-picker__input {
+  width: 100%;
+  border: 1px solid var(--hairline);
+  border-radius: 9px;
+  background: #fff;
+  padding: 0.55rem 0.7rem;
+  font-size: 0.95rem;
+  color: var(--ink);
+  font-family: inherit;
+}
+
+.place-picker__input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.place-picker__listbox {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  margin: 0.25rem 0 0;
+  padding: 0;
+  list-style: none;
+  background: #fff;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 15%);
+  overflow: hidden;
+}
+
+.place-picker__option {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: none;
+  padding: 0.55rem 0.75rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+.place-picker__option:hover {
+  background: #f5f5f4;
+}
+
+.place-picker__option small {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.place-picker__hint {
+  font-size: 0.73rem;
+  color: var(--muted);
+}
+
+.place-picker__hint--error {
+  color: #b91c1c;
+}
+
+/* Season toggle + mode row */
+.season-toggle,
+.mode-row {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.season,
+.mode {
+  flex: 1;
+  border: 1px solid var(--hairline);
+  background: #fff;
+  border-radius: 9px;
+  padding: 0.5rem 0.4rem;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  color: var(--ink);
+}
+
+.season--active {
+  border-color: var(--accent);
+  background: #f0fdfa;
+  font-weight: 600;
+}
+
+.season--monsoon.season--active {
+  border-color: var(--chhaya-monsoon);
+  background: #eff6ff;
+}
+
+.mode--active {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+  font-weight: 600;
+}
+
+.find {
+  border: 0;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.95rem;
+  padding: 0.65rem;
+  cursor: pointer;
+}
+
+.find:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.statusline {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.banner {
+  border-radius: 10px;
+  padding: 0.55rem 0.75rem;
+  font-size: 0.8rem;
+}
+
+.banner--error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #b91c1c;
+}
+
+.banner--info {
+  background: #f0fdfa;
+  border: 1px solid #99f6e4;
+  color: #134e4a;
+}
+
+/* Comparison chips: wrap on phones (§6.7). */
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  padding: 0.25rem 0.65rem;
+  font-size: 0.78rem;
+  background: #fafaf9;
+}
+
+.chip__label {
+  color: var(--muted);
+}
+
+.chip__value {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.chip--good {
+  border-color: #99f6e4;
+  background: #f0fdfa;
+}
+
+.chip--warn {
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+
+/* Legend */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.9rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+}
+
+/* Sparkline behind the strip */
+.sparkline-svg {
+  display: block;
+  width: 100%;
+  height: 26px;
+  color: var(--accent);
+  opacity: 0.85;
+}
+
+/* Time strip */
+.time-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.time-strip input[type='range'] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.time-strip--disabled {
+  opacity: 0.65;
+}
+
+.time-strip__ticks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.68rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.time-strip__value {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* Notices (dev-mode map fallback). */
 .notice {
   position: absolute;
   bottom: 0.75rem;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 10;
+  z-index: 5;
   width: min(480px, calc(100% - 1.5rem));
   background: #fff7ed;
   border: 1px solid #fed7aa;
@@ -82,4 +367,13 @@ body,
 
 .maplibregl-ctrl-attrib {
   font-size: 10px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
